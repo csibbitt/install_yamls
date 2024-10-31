@@ -454,6 +454,7 @@ edpm_networker_cleanup: ## Delete EDPM networker node VM
 .PHONY: edpm_deploy_instance
 edpm_deploy_instance: export NO_OF_INSTANCES=${NUMBER_OF_INSTANCES}
 edpm_deploy_instance: ## Spin a instance on edpm node
+	# -scripts/edpm-prepare-deploy-instance.sh
 	-oc cp scripts/edpm-deploy-instance.sh openstackclient:/tmp/
 	-oc rsh openstackclient bash /tmp/edpm-deploy-instance.sh ${NO_OF_INSTANCES}
 

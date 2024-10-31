@@ -70,8 +70,37 @@ if [ ! -d "${HOME}/.ssh" ]; then
     restorecon -R "${HOME}/.ssh"
 fi
 
+# - We cannot pass multiple PCI devices (GPU + Audio) when we enable iommu
+#   https://bugzilla.redhat.com/show_bug.cgi?id=2050175
+#
+# - According to https://wiki.qemu.org/Features/VT-d to fully enable vIOMMU
+#   functionality `intremap=on` must be set, but currently interrupt remapping
+#   does not support full kernel irqchip, only "split" and "off" are supported.
+#   That's why we set `<ioapic driver='qemu'/>`, it sets `kernel_irqchip=split`
+#   in QEMU. Setting it to `kvm` would be equivalent to `on`.
+
+# Change the qemu part to use the
+# <devices>
+#   <iommu model='intel'>
+#     <driver intremap='on'/>
+#   </iommu>
+# </devices>
+# As per https://libvirt.org/formatdomain.html#iommu-devices
+
+# Vendor ID from hosts't /sys/class/dmi/id/sys_vendor
+
+VENDOR_ID="$(cat /sys/class/dmi/id/sys_vendor)"
+
 cat <<EOF >${OUTPUT_DIR}/${EDPM_COMPUTE_NAME}.xml
-<domain type='kvm'>
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <qemu:commandline>
+     <qemu:arg value='-cpu'/>
+     <qemu:arg value='host,hv_time,kvm=off,hv_vendor_id=null'/>
+
+     <qemu:arg value='-device'/>
+     <qemu:arg value='intel-iommu,intremap=on,caching-mode=on'/>
+  </qemu:commandline>
+
   <name>${EDPM_COMPUTE_NAME}</name>
   <memory unit='GiB'>${EDPM_COMPUTE_RAM}</memory>
   <currentMemory unit='GiB'>${EDPM_COMPUTE_RAM}</currentMemory>
@@ -86,6 +115,13 @@ cat <<EOF >${OUTPUT_DIR}/${EDPM_COMPUTE_NAME}.xml
     <bootmenu enable='no'/>
   </os>
   <features>
+    <ioapic driver='qemu'/>
+    <kvm>
+      <hidden state='on'/>
+    </kvm>
+    <hyperv>
+      <vendor_id state='on' value='${VENDOR_ID}'/>
+    </hyperv>
     <acpi/>
     <apic/>
     <pae/>
@@ -141,6 +177,13 @@ cat <<EOF >${OUTPUT_DIR}/${EDPM_COMPUTE_NAME}.xml
       <target chassis='6' port='0x15'/>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x5'/>
     </controller>
+
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x0000' bus='0x04' slot='0x00' function='0x0'/>
+      </source>
+    </hostdev>
+
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs'/>
       <source dir='${HOME}'/>
@@ -303,6 +346,7 @@ if [ ! -f ${DISK_FILEPATH} ]; then
         --run-command "echo 'PermitRootLogin yes' > /etc/ssh/sshd_config.d/99-root-login.conf" \
         --run-command "mkdir -p /root/.ssh; chmod 0700 /root/.ssh" \
         --run-command "ssh-keygen -f /root/.ssh/id_rsa -N ''" \
+        --run-command "grubby --update-kernel ALL --args 'intel_iommu=on iommu=pt rd.driver.pre=vfio_pci vfio_pci.ids=10de:20f1 modules-load=vfio,vfio-pci,vfio_iommu_type1,vfio_pci_vfio_virqfd'" \
         --ssh-inject root:string:"$(cat $SSH_PUBLIC_KEY)" \
         --no-network \
         --selinux-relabel || rm -f ${DISK_FILEPATH}

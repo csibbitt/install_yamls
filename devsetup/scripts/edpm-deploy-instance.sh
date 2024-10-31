@@ -15,24 +15,24 @@
 # under the License.
 set -ex
 
-# Create Image
-IMG=cirros-0.5.2-x86_64-disk.img
-URL=http://download.cirros-cloud.net/0.5.2/$IMG
-DISK_FORMAT=qcow2
-RAW=$IMG
-NUMBER_OF_INSTANCES=${1:-1}
-curl -L -# $URL > /tmp/$IMG
-if type qemu-img >/dev/null 2>&1; then
-    RAW=$(echo $IMG | sed s/img/raw/g)
-    qemu-img convert -f qcow2 -O raw /tmp/$IMG /tmp/$RAW
-    DISK_FORMAT=raw
+
+CENTOS_9_STREAM_URL="https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2"
+CENTOS9_FILEPATH=/tmp/centos9.qcow2
+
+if ! openstack image show centos9; then
+    if [ ! -f ${CENTOS9_FILEPATH} ]; then
+        curl -L -# $CENTOS_9_STREAM_URL > ${CENTOS9_FILEPATH}
+    fi
+    openstack image show centos9 || \
+        openstack image create --file ${CENTOS9_FILEPATH} --container-format bare --disk-format qcow2 centos9
 fi
-openstack image show cirros || \
-    openstack image create --container-format bare --disk-format $DISK_FORMAT cirros < /tmp/$RAW
 
 # Create flavor
-openstack flavor show m1.small || \
-    openstack flavor create --ram 512 --vcpus 1 --disk 1 --ephemeral 1 m1.small
+openstack flavor show nvidia || \
+    openstack flavor create --ram 20480 --vcpus 20 --disk 11 --ephemeral 2 nvidia \
+      --property "pci_passthrough:alias"="nvidia:1" \
+      --property "hw:pci_numa_affinity_policy=preferred" \
+      --property "hw:hide_hypervisor_id"=true
 
 # Create networks
 openstack network show private || openstack network create private --share
@@ -51,6 +51,8 @@ openstack security group show basic || {
     openstack security group create basic
     openstack security group rule create basic --protocol icmp --ingress --icmp-type -1
     openstack security group rule create basic --protocol tcp --ingress --dst-port 22
+
+    openstack security group rule create basic --protocol tcp --remote-ip 0.0.0.0/0
 }
 
 # List External compute resources
@@ -58,15 +60,23 @@ openstack compute service list
 openstack network agent list
 
 # Create an instance
-for (( i=0; i<${NUMBER_OF_INSTANCES}; i++ )); do
-    NAME=test_${i}
-    openstack server show ${NAME} || {
-        openstack server create --flavor m1.small --image cirros --nic net-id=private ${NAME} --security-group basic --wait
-        fip=$(openstack floating ip create public -f value -c floating_ip_address)
-        openstack server add floating ip ${NAME} $fip
+NAME=nvidia
+openstack server show ${NAME} || {
+    openstack keypair show ${NAME} || {
+        openstack keypair create ${NAME} > ${NAME}.pem
+        # openstack keypair create --public-key ~/.ssh/id_rsa.pub ${NAME}
+        chmod 600 ${NAME}.pem
     }
-    openstack server list --long
+    openstack server create --flavor nvidia --image centos9 --key-name ${NAME} --nic net-id=private ${NAME} --security-group basic --wait
+    fip=$(openstack floating ip create public -f value -c floating_ip_address)
+    openstack server add floating ip ${NAME} ${fip}
+}
+openstack server list --long
 
-    # check connectivity via FIP
-    ping -c4 $fip
-done
+echo "Pinging $fip with 120 seconds timeout to confirm it comes up"
+timeout 120 bash -c "while true; do if ping -c1 -i1 $fip &>/dev/null; then echo 'Machine is up and running up'; break; fi; done"
+
+echo "Changing the default DNS nameserver"
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./${NAME}.pem cloud-user@${fip} 'echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf'
+
+echo "Access VM with: oc rsh openstackclient ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ./${NAME}.pem cloud-user@${fip}"
